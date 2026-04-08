@@ -1,8 +1,6 @@
 import streamlit as st
 from utils import get_client, resume_inputs
 
-st.set_page_config(page_title="Tailor Resume", page_icon="📄", layout="wide")
-
 st.title("📄 Resume Tailoring")
 st.write("Optimize your resume for a specific role with ATS-friendly language and keywords.")
 

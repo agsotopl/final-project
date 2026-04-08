@@ -1,8 +1,6 @@
 import streamlit as st
 from utils import get_client, resume_inputs
 
-st.set_page_config(page_title="Cover Letter", page_icon="✉️", layout="wide")
-
 st.title("✉️ Cover Letter Generator")
 st.write("Paste a job posting and your background — get a tailored cover letter instantly.")
 
