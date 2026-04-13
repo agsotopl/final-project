@@ -1,8 +1,67 @@
 import time
+from datetime import date, datetime, timezone
 import streamlit as st
 import anthropic
 from utils import get_client, resume_inputs
 
+
+def _senior_base_year() -> int:
+    """Return the graduation year for a current senior.
+
+    Seniors graduate at the end of the current academic year:
+    - Jan–Jul  → spring/summer/fall of *this* calendar year
+    - Aug–Dec  → spring/summer/fall of *next* calendar year (fall semester is underway)
+    """
+    today = date.today()
+    return today.year if today.month < 8 else today.year + 1
+
+
+# Maps a class-standing key to years-until-graduation relative to a senior.
+_STANDING_OFFSETS: dict[str, int] = {
+    "Senior": 0,
+    "Junior": 1,
+    "Sophomore": 2,
+    "Freshman": 3,
+}
+
+
+def graduation_window(class_key: str) -> str | None:
+    """Return a human-readable graduation window for *class_key*.
+
+    Includes both season names and the specific months that job postings use
+    (May for Spring, August for Summer, December for Fall/Winter).
+    Returns None for 'N/A'.
+    """
+    if class_key == "N/A":
+        return None
+
+    base = _senior_base_year()
+
+    if class_key == "Graduate Student":
+        return f"May or December {base}–{base + 2} (graduate student, 1–2 year program)"
+
+    offset = _STANDING_OFFSETS.get(class_key)
+    if offset is None:
+        return None
+
+    yr = base + offset
+    return (
+        f"May {yr} (Spring), August {yr} (Summer), or December {yr} (Fall/Winter)"
+    )
+
+
+def _standing_label(class_key: str) -> str:
+    """Build the selectbox display label, e.g. 'Senior (Class of 2026)'."""
+    offset = _STANDING_OFFSETS.get(class_key)
+    if offset is not None:
+        return f"{class_key} (Class of {_senior_base_year() + offset})"
+    return class_key  # 'N/A' and 'Graduate Student' shown as-is
+
+
+# Keys used internally; labels are computed so they stay correct every year.
+_STANDING_KEYS = ["N/A", "Freshman", "Sophomore", "Junior", "Senior", "Graduate Student"]
+_STANDING_LABELS = [_standing_label(k) for k in _STANDING_KEYS]
+t
 st.title("🔍 Job Finder")
 st.write("Finds 5 real, open job postings with direct application links.")
 
@@ -19,6 +78,8 @@ with col2:
     location = st.text_input("Preferred Location", placeholder="e.g. Austin, TX  or  Remote")
     work_type = st.selectbox("Work Type", ["Any", "Remote", "Hybrid", "On-site"])
     experience = st.selectbox("Experience Level", ["Any", "Internship", "Entry Level", "Mid Level", "Senior", "Lead / Principal", "Manager / Director"])
+    class_standing_label = st.selectbox("Class Standing (optional)", _STANDING_LABELS)
+    class_standing_key = _STANDING_KEYS[_STANDING_LABELS.index(class_standing_label)]
     industry = st.text_input("Industry (optional)", placeholder="e.g. FinTech, Healthcare")
     salary = st.text_input("Salary Range (optional)", placeholder="e.g. $90k – $120k")
 
@@ -29,6 +90,8 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
         st.warning("Please enter a desired role to search for.", icon="⚠️")
         st.stop()
 
+    graduation_str = graduation_window(class_standing_key)
+
     location_str = location or "remote"
     work_type_str = f" {work_type.lower()}" if work_type != "Any" else ""
     experience_str = f" {experience}" if experience != "Any" else ""
@@ -38,6 +101,7 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
 --- ROLE TO SEARCH FOR ---
 {experience_str.strip() + " " if experience_str else ""}{desired_role}{work_type_str}, {location_str}{f', {industry}' if industry else ''}
 {f'Salary preference: {salary}' if salary else ''}
+{f'Candidate graduation window: {graduation_str} — prioritize postings that explicitly target this graduation cohort or are open to candidates graduating in this range (especially relevant for internships and new grad roles).' if graduation_str else ''}
 
 --- STEP-BY-STEP INSTRUCTIONS ---
 
@@ -86,14 +150,75 @@ RULES:
 - Do not give job search advice or general recommendations
 - Output only the 5 job listings, nothing else"""
 
-    def create_with_retry(client, delay=15, **kwargs):
-        """Call messages.create, retrying once after a wait on rate limit errors."""
-        try:
-            return client.messages.create(**kwargs)
-        except anthropic.RateLimitError:
-            status.warning(f"Rate limit hit — waiting {delay}s before retrying…", icon="⏳")
-            time.sleep(delay)
-            return client.messages.create(**kwargs)
+    def trim_tool_results(content_blocks, max_chars: int = 800):
+        """Truncate server_tool_result text so conversation history stays small.
+
+        web_fetch responses are full HTML pages (10k–50k tokens each).  The model
+        has already processed them; resending the full HTML on every subsequent turn
+        is what exhausts the 50k input-token-per-minute limit.
+        """
+        trimmed = []
+        for block in content_blocks:
+            if getattr(block, "type", None) == "server_tool_result":
+                d = block.model_dump()
+                content = d.get("content", "")
+                if isinstance(content, str) and len(content) > max_chars:
+                    d["content"] = content[:max_chars] + "\n…[truncated to preserve token budget]"
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text = item.get("text", "")
+                            if len(text) > max_chars:
+                                item["text"] = text[:max_chars] + "\n…[truncated to preserve token budget]"
+                trimmed.append(d)
+            else:
+                trimmed.append(block)
+        return trimmed
+
+    def create_with_retry(client, **kwargs):
+        """Call messages.create with proactive throttling + exponential backoff.
+
+        Uses the rate-limit headers returned on every response to sleep *before*
+        hitting the limit.  Falls back to reactive backoff (15 → 30 → 60 s) if a
+        429 slips through anyway.
+        """
+        delays = [15, 30, 60]
+        # Tokens-remaining threshold below which we pause until the window resets.
+        # 10 000 gives roughly one more large request before the cap is hit.
+        LOW_TOKEN_THRESHOLD = 10_000
+
+        for i, delay in enumerate(delays):
+            try:
+                raw = client.messages.with_raw_response.create(**kwargs)
+
+                # --- proactive throttle ---
+                remaining = raw.headers.get("x-ratelimit-remaining-input-tokens")
+                reset_at  = raw.headers.get("x-ratelimit-reset-input-tokens")
+                if remaining is not None and int(remaining) < LOW_TOKEN_THRESHOLD and reset_at:
+                    try:
+                        reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+                        wait = (reset_dt - datetime.now(timezone.utc)).total_seconds()
+                        if wait > 0:
+                            status.warning(
+                                f"Approaching rate limit ({remaining} tokens left) — "
+                                f"pausing {wait:.0f}s until window resets…",
+                                icon="⏳",
+                            )
+                            time.sleep(wait + 1)
+                    except ValueError:
+                        pass  # malformed header — skip the proactive wait
+
+                return raw.parse()
+
+            except anthropic.RateLimitError:
+                if i == len(delays) - 1:
+                    raise
+                status.warning(
+                    f"Rate limit hit — waiting {delay}s before retrying… "
+                    f"(attempt {i + 1}/{len(delays)})",
+                    icon="⏳",
+                )
+                time.sleep(delay)
 
     client = get_client()
     status = st.empty()
@@ -142,10 +267,10 @@ RULES:
         if response.stop_reason == "pause_turn":
             messages = [
                 {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response.content},
+                {"role": "assistant", "content": trim_tool_results(response.content)},
             ]
-            # Brief pause between turns to avoid burst rate limiting
-            time.sleep(3)
+            # Pause between turns to avoid burst rate limiting
+            time.sleep(10)
         else:
             break
 

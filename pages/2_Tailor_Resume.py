@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import get_client, resume_inputs
+from utils import get_client, resume_inputs, load_repo_template, extract_template_from_upload
 
 st.title("📄 Resume Tailoring")
 st.write("Optimize your resume for a specific role with ATS-friendly language and keywords.")
@@ -21,6 +21,16 @@ with col2:
 
 st.divider()
 
+with st.expander("📎 Resume Template (optional override)"):
+    st.caption("By default the agent uses the template stored in the repo. Upload your own PDF to override it.")
+    custom_template_file = st.file_uploader(
+        "Upload your resume template (PDF, DOCX, or TXT)",
+        type=["pdf", "docx", "txt"],
+        key="resume_template",
+    )
+
+st.divider()
+
 if st.button("📄 Tailor My Resume", type="primary", use_container_width=True):
     if not resume_content:
         st.error("Please provide your resume to tailor.")
@@ -30,6 +40,32 @@ if st.button("📄 Tailor My Resume", type="primary", use_container_width=True):
         st.info("No job posting provided — optimizing for general professional impact.", icon="ℹ️")
 
     st.subheader("Tailored Resume")
+
+    # Load template — user upload takes priority over repo default
+    if custom_template_file:
+        template_text, formatting_guide = extract_template_from_upload(custom_template_file)
+    else:
+        template_text, formatting_guide = load_repo_template("resume_template")
+
+    # Build the template injection block for the prompt
+    template_block = ""
+    if template_text.strip():
+        template_block += f"""
+FORMATTING TEMPLATE:
+Reproduce the exact structure, section order, spacing, and layout of this template.
+Do NOT copy its content — only replicate the format. Replace all placeholder text
+with the candidate's real information.
+
+{template_text}
+"""
+    if formatting_guide.strip():
+        template_block += f"""
+{formatting_guide}
+
+Apply the font names and sizes above to the matching content types in your output.
+The largest font size is the candidate's name. The next level down is section headers.
+Body text and bullet points use the smallest size listed.
+"""
 
     prompt = f"""Tailor and optimise this resume for the target job posting.
 
@@ -46,7 +82,7 @@ Instructions:
 4. Weave in keywords from the job posting for ATS compatibility
 5. Keep all content truthful — rephrase and restructure only, do not fabricate
 6. Maintain a clean, scannable format with clear section headings
-
+{template_block}
 Output the complete tailored resume."""
 
     client = get_client()
@@ -54,7 +90,7 @@ Output the complete tailored resume."""
     full_text = ""
 
     with client.messages.stream(
-        model="claude-haiku-4-5",
+        model="claude-sonnet-4-6",
         max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:

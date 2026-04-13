@@ -1,4 +1,6 @@
 streamlit
 anthropic
+openai
 pypdf
+pdfplumber
 python-docx
