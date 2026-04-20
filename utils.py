@@ -224,9 +224,6 @@ def resume_inputs():
         extracted = extract_text_from_file(uploaded)
         if extracted:
             parts.append(f"[UPLOADED RESUME]\n{extracted}")
-            # Mirror the upload into session state so other pages see it immediately
-            st.session_state["resume_text"] = extracted
-            st.session_state["_resume_from_db"] = False
     if pasted.strip():
         parts.append(pasted.strip())
 
