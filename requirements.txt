@@ -4,3 +4,5 @@ openai
 pypdf
 pdfplumber
 python-docx
+sentence-transformers
+numpy
