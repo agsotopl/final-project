@@ -61,7 +61,44 @@ def _standing_label(class_key: str) -> str:
 # Keys used internally; labels are computed so they stay correct every year.
 _STANDING_KEYS = ["N/A", "Freshman", "Sophomore", "Junior", "Senior", "Graduate Student"]
 _STANDING_LABELS = [_standing_label(k) for k in _STANDING_KEYS]
-t
+
+# ---------------------------------------------------------------------------
+# Compatibility checks: (experience_level, class_standing_key) → warning msg
+# Hard blocks return (message, True); soft warnings return (message, False).
+# ---------------------------------------------------------------------------
+_INCOMPATIBLE: list[tuple[set, set, str, bool]] = [
+    # experience levels that make no sense for internships
+    (
+        {"Lead / Principal", "Manager / Director"},
+        {"Freshman", "Sophomore", "Junior", "Senior", "Graduate Student", "N/A"},
+        "Internship-level searches are unlikely to return results for Lead / Principal or Manager / Director roles.",
+        False,
+    ),
+    # senior graduating this cycle + internship — recruiting already closed
+    (
+        {"Internship"},
+        {"Senior"},
+        "Seniors graduating this cycle are rarely eligible for new internships — most recruiting for the current summer has already closed. Consider 'Entry Level' or 'New Grad' instead.",
+        False,
+    ),
+    # senior or grad + internship is a soft warning, not a hard block
+    (
+        {"Internship"},
+        {"Graduate Student"},
+        "Graduate student internship postings exist but are limited — results may be sparse. Consider broadening to 'Entry Level' if you don't find enough.",
+        False,
+    ),
+]
+
+
+def check_compatibility(experience: str, class_key: str) -> tuple[str | None, bool]:
+    """Return (warning_message, is_hard_block) or (None, False) if compatible."""
+    for exp_set, standing_set, msg, hard in _INCOMPATIBLE:
+        if experience in exp_set and class_key in standing_set:
+            return msg, hard
+    return None, False
+
+
 st.title("🔍 Job Finder")
 st.write("Finds 5 real, open job postings with direct application links.")
 
@@ -89,6 +126,14 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
     if not desired_role:
         st.warning("Please enter a desired role to search for.", icon="⚠️")
         st.stop()
+
+    compat_msg, is_hard_block = check_compatibility(experience, class_standing_key)
+    if compat_msg:
+        if is_hard_block:
+            st.error(compat_msg, icon="🚫")
+            st.stop()
+        else:
+            st.warning(compat_msg, icon="⚠️")
 
     graduation_str = graduation_window(class_standing_key)
 
@@ -148,7 +193,8 @@ RULES:
 - Every listing must have a working direct URL (not a search results page)
 - Do not list a job unless you have fetched its page and confirmed it is open
 - Do not give job search advice or general recommendations
-- Output only the 5 job listings, nothing else"""
+- If fewer than 5 verified postings exist for this search, output however many you found (even 1 or 2) and add a short note explaining that results were limited for this criteria — do NOT fabricate listings to reach 5
+- Output only the job listings (and the note if applicable), nothing else"""
 
     def trim_tool_results(content_blocks, max_chars: int = 800):
         """Truncate server_tool_result text so conversation history stays small.
