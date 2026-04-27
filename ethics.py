@@ -109,16 +109,16 @@ def display_ethics_result(result: dict) -> None:
     st.subheader("Ethics Rubric Check")
 
     if verdict == "pass":
-        st.success(f"**PASS** — {explanation}", icon="✅")
+        st.success(f"**PASS** — {explanation}")
 
     elif verdict == "warn":
-        st.warning(f"**WARN** — {explanation}", icon="⚠️")
+        st.warning(f"**WARN** — {explanation}")
         if issues:
             for issue in issues:
                 st.caption(f"• {issue}")
 
     else:  # "flag"
-        st.error(f"**FLAG** — {explanation}", icon="🚩")
+        st.error(f"**FLAG** — {explanation}")
         if issues:
             for issue in issues:
                 st.caption(f"• {issue}")

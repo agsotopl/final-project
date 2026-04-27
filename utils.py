@@ -160,6 +160,230 @@ def extract_template_from_upload(uploaded_file) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# PDF generation
+# ---------------------------------------------------------------------------
+
+def generate_resume_pdf(text: str) -> bytes:
+    """Render resume text (markdown-ish LLM output) to a formatted PDF.
+
+    Styling mirrors the repo template:
+      - 17 pt Times-Bold   → candidate name  (first non-empty line)
+      - 10 pt Times-Roman  → contact / tagline line (second non-empty line)
+      - 12 pt Times-Bold   → section headers (ALL-CAPS short lines)
+      - 10 pt Times-Bold   → company / school names  (**bold** markers)
+      - 10 pt Times-Italic → job titles / dates       (*italic* markers)
+      - 10 pt Times-Roman  → body text
+      - 10 pt Times-Roman  → bullet points (-, •, ●)
+    """
+    import re
+    from io import BytesIO
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    # ── Styles ──────────────────────────────────────────────────────────────
+    def _style(name, font, size, **kw):
+        return ParagraphStyle(name, fontName=font, fontSize=size,
+                              leading=size * 1.25, **kw)
+
+    S = {
+        "name":    _style("name",    "Times-Bold",   17, alignment=1, spaceAfter=2),
+        "contact": _style("contact", "Times-Roman",  10, alignment=1, spaceAfter=6),
+        "section": _style("section", "Times-Bold",   12, spaceBefore=8, spaceAfter=3),
+        "company": _style("company", "Times-Bold",   10, spaceAfter=1),
+        "italic":  _style("italic",  "Times-Italic", 10, spaceAfter=1),
+        "body":    _style("body",    "Times-Roman",  10, spaceAfter=2),
+        "bullet":  _style("bullet",  "Times-Roman",  10, spaceAfter=1,
+                          leftIndent=16, firstLineIndent=-8),
+    }
+
+    # ── Inline markdown → reportlab XML ─────────────────────────────────────
+    def _inline(line: str) -> str:
+        """Convert **bold** and *italic* markdown to reportlab XML tags."""
+        line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"\*(.+?)\*",     r"<i>\1</i>", line)
+        return line
+
+    # ── Classify each line ───────────────────────────────────────────────────
+    def _classify(line: str, line_idx: int, first_idx: int, second_idx: int):
+        stripped = line.strip()
+        if not stripped:
+            return None, None
+
+        # Markdown heading levels
+        if stripped.startswith("### "):
+            return "company", stripped[4:]
+        if stripped.startswith("## "):
+            return "section", stripped[3:]
+        if stripped.startswith("# "):
+            return "name", stripped[2:]
+
+        # Bullet markers (flexible: dash, bullet chars, optional extra spaces)
+        m = re.match(r"^[-•●]\s*", stripped)
+        if m:
+            return "bullet", stripped[m.end():]
+
+        # **entire line bold** → company/school
+        if re.match(r"^\*\*.+\*\*$", stripped):
+            return "company", stripped[2:-2]
+
+        # *entire line italic* → title/date
+        if re.match(r"^\*.+\*$", stripped) and not stripped.startswith("**"):
+            return "italic", stripped[1:-1]
+
+        # ALL-CAPS short line → section header
+        if stripped.isupper() and len(stripped) < 40:
+            return "section", stripped
+
+        # Positional heuristics (no markdown headers present)
+        if line_idx == first_idx:
+            return "name", stripped
+        if line_idx == second_idx:
+            return "contact", stripped
+
+        return "body", stripped
+
+    # ── Build story ──────────────────────────────────────────────────────────
+    lines = text.splitlines()
+    non_empty = [i for i, l in enumerate(lines) if l.strip()]
+    first_idx  = non_empty[0] if len(non_empty) > 0 else -1
+    second_idx = non_empty[1] if len(non_empty) > 1 else -1
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,  bottomMargin=0.75 * inch,
+    )
+
+    # State: once we pass an italic (title/dates) line inside a section,
+    # plain body lines are experience/project bullets until the next section resets.
+    after_title = False
+
+    story = []
+    for idx, line in enumerate(lines):
+        kind, content = _classify(line, idx, first_idx, second_idx)
+        if kind is None:
+            story.append(Spacer(1, 4))
+            continue
+
+        # Update state
+        if kind == "italic":
+            after_title = True
+        elif kind in ("section", "name", "contact"):
+            after_title = False
+
+        # Promote unmarked body lines to bullets when inside an experience/project block
+        if kind == "body" and after_title:
+            kind = "bullet"
+
+        if kind == "section":
+            story.append(HRFlowable(width="100%", thickness=0.5,
+                                    color=colors.black, spaceAfter=2))
+
+        rendered = f"● {_inline(content)}" if kind == "bullet" else _inline(content)
+        story.append(Paragraph(rendered, S[kind]))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Cover letter PDF generation
+# ---------------------------------------------------------------------------
+
+def generate_cover_letter_pdf(text: str) -> bytes:
+    """Render cover letter text (LLM output) to a formatted PDF.
+
+    Mirrors the repo cover letter template:
+      - 20 pt Times-Roman centered → name / tagline        (first non-empty line)
+      - 11 pt Times-Roman centered → contact info           (second non-empty line)
+      - 11 pt Times-Roman tight    → date + recipient block (up to "Dear …")
+      - 11 pt Times-Roman spaced   → salutation, body paragraphs, closing
+    """
+    import re
+    from io import BytesIO
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    def _style(name, font, size, **kw):
+        return ParagraphStyle(name, fontName=font, fontSize=size,
+                              leading=size * 1.3, **kw)
+
+    S = {
+        "name":    _style("name",    "Times-Roman", 20, alignment=1, spaceAfter=2),
+        "contact": _style("contact", "Times-Roman", 11, alignment=1, spaceAfter=6),
+        # tight: date + recipient address — single-spaced, no extra gap between lines
+        "tight":   _style("tight",   "Times-Roman", 11, spaceAfter=1),
+        # body: letter paragraphs — space between paragraphs
+        "body":    _style("body",    "Times-Roman", 11, spaceAfter=8),
+    }
+
+    def _inline(line: str) -> str:
+        line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"\*(.+?)\*",     r"<i>\1</i>", line)
+        return line
+
+    lines = text.splitlines()
+    non_empty = [i for i, l in enumerate(lines) if l.strip()]
+    first_idx  = non_empty[0] if len(non_empty) > 0 else -1
+    second_idx = non_empty[1] if len(non_empty) > 1 else -1
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        leftMargin=inch, rightMargin=inch,
+        topMargin=0.5 * inch, bottomMargin=inch,
+    )
+
+    # States: "header" → "address" → "body"
+    # "address" = date + recipient block (tight spacing, no blank-line gaps)
+    # Transitions to "body" on the first "Dear …" line.
+    state = "header"
+
+    story = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Blank line handling per state
+        if not stripped:
+            if state == "address":
+                pass  # suppress blank lines inside the address block
+            elif state == "body":
+                story.append(Spacer(1, 4))
+            else:
+                story.append(Spacer(1, 4))
+            continue
+
+        # Detect transition from address block to letter body
+        if state == "address" and re.match(r"^Dear\b", stripped, re.IGNORECASE):
+            state = "body"
+            story.append(Spacer(1, 10))  # single gap before salutation
+
+        # Assign style
+        if idx == first_idx:
+            style = S["name"]
+        elif idx == second_idx:
+            style = S["contact"]
+            state = "address"           # everything after contact = address block
+        elif state == "address":
+            style = S["tight"]
+        else:
+            style = S["body"]
+
+        story.append(Paragraph(_inline(stripped), style))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # Resume content helpers
 # ---------------------------------------------------------------------------
 

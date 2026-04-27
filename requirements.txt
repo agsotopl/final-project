@@ -4,5 +4,6 @@ openai
 pypdf
 pdfplumber
 python-docx
+reportlab
 sentence-transformers
 numpy

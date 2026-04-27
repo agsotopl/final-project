@@ -1,7 +1,8 @@
 import streamlit as st
-from utils import get_openai_client, resume_inputs, load_repo_template, extract_template_from_upload
+from utils import (get_openai_client, resume_inputs, load_repo_template,
+                   extract_template_from_upload, generate_cover_letter_pdf)
 
-st.title("✉️ Cover Letter Generator")
+st.title("Cover Letter Generator")
 st.write("Paste a job posting and your background — get a tailored cover letter instantly.")
 
 st.divider()
@@ -21,7 +22,7 @@ with col2:
 
 st.divider()
 
-with st.expander("📎 Cover Letter Template (optional override)"):
+with st.expander("Cover Letter Template (optional override)"):
     st.caption("By default the agent uses the template stored in the repo. Upload your own PDF to override it.")
     custom_template_file = st.file_uploader(
         "Upload your cover letter template (PDF, DOCX, or TXT)",
@@ -31,13 +32,13 @@ with st.expander("📎 Cover Letter Template (optional override)"):
 
 st.divider()
 
-if st.button("✉️ Generate Cover Letter", type="primary", use_container_width=True):
+if st.button("Generate Cover Letter", type="primary", use_container_width=True):
     if not resume_content:
-        st.warning("Please upload your resume or paste your background information.", icon="⚠️")
+        st.warning("Please upload your resume or paste your background information.")
         st.stop()
 
     if not job_posting.strip():
-        st.info("No job posting provided — generating a general version.", icon="ℹ️")
+        st.info("No job posting provided — generating a general version.")
 
     st.subheader("Your Cover Letter")
 
@@ -100,9 +101,6 @@ Output only the cover letter text."""
             full_text += delta
             result_area.markdown(full_text)
 
-    st.download_button(
-        "📥 Download Cover Letter",
-        full_text,
-        file_name="cover_letter.txt",
-        mime="text/plain",
-    )
+    st.download_button("Download Cover Letter (PDF)",
+                       generate_cover_letter_pdf(full_text),
+                       file_name="cover_letter.pdf", mime="application/pdf")

@@ -106,7 +106,7 @@ def check_compatibility(experience: str, class_key: str) -> tuple[str | None, bo
 # --- LONG-TERM MEMORY: pre-populate job-search preferences from SQLite on first visit ---
 memory.init_session_preferences()
 
-st.title("🔍 Job Finder")
+st.title("Job Finder")
 st.write("Finds 5 real, open job postings with direct application links.")
 
 st.divider()
@@ -164,7 +164,7 @@ st.divider()
 # --- NEW: show previous job searches from long-term memory ---
 job_history = memory.load_job_history(limit=3)
 if job_history:
-    with st.expander("📋 Recent Job Searches (from your history)"):
+    with st.expander("Recent Job Searches (from your history)"):
         for entry in job_history:
             st.caption(
                 f"**{entry['role']}** in {entry['location']} — "
@@ -173,18 +173,18 @@ if job_history:
             st.text(entry["results"][:400] + ("…" if len(entry["results"]) > 400 else ""))
             st.markdown("---")
 
-if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True):
+if st.button("Find Relevant Jobs", type="primary", use_container_width=True):
     if not desired_role:
-        st.warning("Please enter a desired role to search for.", icon="⚠️")
+        st.warning("Please enter a desired role to search for.")
         st.stop()
 
     compat_msg, is_hard_block = check_compatibility(experience, class_standing_key)
     if compat_msg:
         if is_hard_block:
-            st.error(compat_msg, icon="🚫")
+            st.error(compat_msg)
             st.stop()
         else:
-            st.warning(compat_msg, icon="⚠️")
+            st.warning(compat_msg)
 
     # --- LONG-TERM MEMORY: persist current preferences to SQLite ---
     memory.save_preferences({
@@ -221,24 +221,11 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
             score_pct = f"{score * 100:.0f}%"
             st.markdown(
                 f"**{job.get('title', 'Role')}** — {job.get('company', '')}  "
-                f"| 📍 {job.get('location', '')}  | 🎯 Similarity: {score_pct}"
+                f"| {job.get('location', '')}  | Similarity: {score_pct}"
             )
             if job.get("description"):
                 st.caption(job["description"][:200] + "…")
             st.markdown("---")
-
-    # Build RAG context block to pass as a hint to the live agent
-    rag_context = ""
-    if rag_jobs:
-        rag_context = (
-            "\n\nSIMILAR ROLES FROM KNOWLEDGE BASE "
-            "(top matches by semantic similarity — use as calibration context):\n"
-        )
-        for job in rag_jobs[:3]:
-            rag_context += (
-                f"- {job.get('title', '')} at {job.get('company', '')} "
-                f"({job.get('location', '')})\n"
-            )
 
     prompt = f"""You are a job search assistant. Your goal is to return exactly 5 real, currently open job postings with direct apply links. Follow every step below precisely.
 
@@ -246,7 +233,6 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
 {experience_str.strip() + " " if experience_str else ""}{desired_role}{work_type_str}, {location_str}{f', {industry}' if industry else ''}
 {f'Salary preference: {salary}' if salary else ''}
 {f'Candidate graduation window: {graduation_str} — prioritize postings that explicitly target this graduation cohort or are open to candidates graduating in this range (especially relevant for internships and new grad roles).' if graduation_str else ''}
-{rag_context}
 --- STEP-BY-STEP INSTRUCTIONS ---
 
 STEP 1: Search for individual job postings on ATS platforms and company career pages.
@@ -280,7 +266,7 @@ STEP 4: Output exactly 5 postings using this format:
 
 ### 1. [Job Title] — [Company]
 **Location:** [city / remote]
-**Apply:** [direct URL]
+**Apply:** [full direct URL — REQUIRED, no exceptions]
 [2–3 sentence description from the actual posting]
 
 ---
@@ -288,37 +274,12 @@ STEP 4: Output exactly 5 postings using this format:
 {f'CANDIDATE BACKGROUND (to assess fit):{chr(10)}{resume_content}' if resume_content else ''}
 
 RULES:
-- Every listing must come from a page you actually fetched with web_fetch
-- Every listing must have a working direct URL (not a search results page)
-- Do not list a job unless you have fetched its page and confirmed it is open
+- Every listing MUST include a full, direct Apply URL — omit any listing where you cannot provide one
+- The Apply URL must be the exact URL you fetched with web_fetch (not a search results page, not a homepage)
+- Every listing must come from a page you actually fetched with web_fetch and confirmed is open
 - Do not give job search advice or general recommendations
-- If fewer than 5 verified postings exist for this search, output however many you found (even 1 or 2) and add a short note explaining that results were limited for this criteria — do NOT fabricate listings to reach 5
+- If fewer than 5 verified postings with confirmed URLs exist, output however many you found and add a short note explaining that results were limited — do NOT fabricate listings or URLs to reach 5
 - Output only the job listings (and the note if applicable), nothing else"""
-
-    def trim_tool_results(content_blocks, max_chars: int = 800):
-        """Truncate server_tool_result text so conversation history stays small.
-
-        web_fetch responses are full HTML pages (10k–50k tokens each).  The model
-        has already processed them; resending the full HTML on every subsequent turn
-        is what exhausts the 50k input-token-per-minute limit.
-        """
-        trimmed = []
-        for block in content_blocks:
-            if getattr(block, "type", None) == "server_tool_result":
-                d = block.model_dump()
-                content = d.get("content", "")
-                if isinstance(content, str) and len(content) > max_chars:
-                    d["content"] = content[:max_chars] + "\n…[truncated to preserve token budget]"
-                elif isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text = item.get("text", "")
-                            if len(text) > max_chars:
-                                item["text"] = text[:max_chars] + "\n…[truncated to preserve token budget]"
-                trimmed.append(d)
-            else:
-                trimmed.append(block)
-        return trimmed
 
     def create_with_retry(client, **kwargs):
         """Call messages.create with proactive throttling + exponential backoff.
@@ -327,7 +288,7 @@ RULES:
         hitting the limit.  Falls back to reactive backoff (15 → 30 → 60 s) if a
         429 slips through anyway.
         """
-        delays = [15, 30, 60]
+        delays = [20, 65, 65, 120]
         # Tokens-remaining threshold below which we pause until the window resets.
         # 10 000 gives roughly one more large request before the cap is hit.
         LOW_TOKEN_THRESHOLD = 10_000
@@ -346,8 +307,7 @@ RULES:
                         if wait > 0:
                             status.warning(
                                 f"Approaching rate limit ({remaining} tokens left) — "
-                                f"pausing {wait:.0f}s until window resets…",
-                                icon="⏳",
+                                f"pausing {wait:.0f}s until window resets…"
                             )
                             time.sleep(wait + 1)
                     except ValueError:
@@ -360,22 +320,21 @@ RULES:
                     raise
                 status.warning(
                     f"Rate limit hit — waiting {delay}s before retrying… "
-                    f"(attempt {i + 1}/{len(delays)})",
-                    icon="⏳",
+                    f"(attempt {i + 1}/{len(delays)})"
                 )
                 time.sleep(delay)
 
     client = get_client()
     status = st.empty()
     result_area = st.empty()
-    status.info("Searching Greenhouse, Lever, Ashby, Amazon, JPMorgan, and more…", icon="🔍")
+    status.info("Searching Greenhouse, Lever, Ashby, Amazon, JPMorgan, and more…")
 
-    messages = [{"role": "user", "content": prompt}]
     full_text = ""
     search_count = 0
     fetch_count = 0
 
     for _ in range(15):
+        # Always send a clean single-message prompt — no history, no prior context.
         response = create_with_retry(
             client,
             model="claude-haiku-4-5",
@@ -385,7 +344,7 @@ RULES:
                 {"type": "web_search_20260209", "name": "web_search", "allowed_callers": ["direct"]},
                 {"type": "web_fetch_20260209",  "name": "web_fetch",  "allowed_callers": ["direct"]},
             ],
-            messages=messages,
+            messages=[{"role": "user", "content": prompt}],
         )
 
         for block in response.content:
@@ -395,27 +354,19 @@ RULES:
                 inp = getattr(block, "input", {})
                 if tool_name == "web_search":
                     search_count += 1
-                    status.info(f"Searching: *{inp.get('query', '')}*", icon="🔍")
+                    status.info(f"Searching: *{inp.get('query', '')}*")
                 elif tool_name == "web_fetch":
                     fetch_count += 1
-                    status.info(f"Reading posting {fetch_count}: {inp.get('url', '')}", icon="📄")
+                    status.info(f"Reading posting {fetch_count}: {inp.get('url', '')}")
 
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 full_text += block.text
                 result_area.markdown(full_text)
 
-        if response.stop_reason == "end_turn":
+        if response.stop_reason in ("end_turn", "pause_turn"):
             status.success(f"Done — {search_count} searches, {fetch_count} postings read.")
             break
-
-        if response.stop_reason == "pause_turn":
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": trim_tool_results(response.content)},
-            ]
-            # Pause between turns to avoid burst rate limiting
-            time.sleep(10)
         else:
             break
 
@@ -430,7 +381,7 @@ RULES:
         })
 
         st.download_button(
-            "📥 Download Job List",
+            "Download Job List",
             full_text,
             file_name="job_postings.txt",
             mime="text/plain",
