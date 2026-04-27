@@ -1,6 +1,10 @@
 import streamlit as st
 from utils import get_client, resume_inputs, load_repo_template, extract_template_from_upload
 
+# --- NEW: ethics rubric module ---
+import ethics
+import memory
+
 st.title("📄 Resume Tailoring")
 st.write("Optimize your resume for a specific role with ATS-friendly language and keywords.")
 
@@ -38,6 +42,9 @@ if st.button("📄 Tailor My Resume", type="primary", use_container_width=True):
 
     if not job_posting.strip():
         st.info("No job posting provided — optimizing for general professional impact.", icon="ℹ️")
+
+    # --- LONG-TERM MEMORY: save resume on each generation run ---
+    memory.save_resume(resume_content)
 
     st.subheader("Tailored Resume")
 
@@ -98,6 +105,18 @@ Output the complete tailored resume."""
             full_text += chunk
             result_area.markdown(full_text)
 
+    st.divider()
+
+    # --- NEW: ETHICS RUBRIC EVALUATION ---
+    # Run a secondary Claude call to audit the tailored output before download.
+    with st.spinner("Running ethics rubric check…"):
+        ethics_result = ethics.evaluate_resume_ethics(full_text, job_posting)
+
+    ethics.display_ethics_result(ethics_result)
+
+    st.divider()
+
+    # Download is shown after the ethics result so the user sees it first.
     st.download_button(
         "📥 Download Tailored Resume",
         full_text,

@@ -4,6 +4,10 @@ import streamlit as st
 import anthropic
 from utils import get_client, resume_inputs
 
+# --- NEW: memory and RAG modules ---
+import memory
+import rag
+
 
 def _senior_base_year() -> int:
     """Return the graduation year for a current senior.
@@ -99,6 +103,9 @@ def check_compatibility(experience: str, class_key: str) -> tuple[str | None, bo
     return None, False
 
 
+# --- LONG-TERM MEMORY: pre-populate job-search preferences from SQLite on first visit ---
+memory.init_session_preferences()
+
 st.title("🔍 Job Finder")
 st.write("Finds 5 real, open job postings with direct application links.")
 
@@ -111,16 +118,60 @@ with col1:
 
 with col2:
     st.subheader("Job Preferences")
-    desired_role = st.text_input("Desired Role / Title", placeholder="e.g. Data Analyst, UX Designer")
-    location = st.text_input("Preferred Location", placeholder="e.g. Austin, TX  or  Remote")
-    work_type = st.selectbox("Work Type", ["Any", "Remote", "Hybrid", "On-site"])
-    experience = st.selectbox("Experience Level", ["Any", "Internship", "Entry Level", "Mid Level", "Senior", "Lead / Principal", "Manager / Director"])
-    class_standing_label = st.selectbox("Class Standing (optional)", _STANDING_LABELS)
+    # SHORT-TERM: widgets keyed to session_state so values survive page switches;
+    # session_state is pre-seeded from SQLite by init_session_preferences() above.
+    desired_role = st.text_input(
+        "Desired Role / Title",
+        key="pref_role",
+        placeholder="e.g. Data Analyst, UX Designer",
+    )
+    location = st.text_input(
+        "Preferred Location",
+        key="pref_location",
+        placeholder="e.g. Austin, TX  or  Remote",
+    )
+    work_type = st.selectbox(
+        "Work Type",
+        ["Any", "Remote", "Hybrid", "On-site"],
+        key="pref_work_type",
+    )
+    experience = st.selectbox(
+        "Experience Level",
+        ["Any", "Internship", "Entry Level", "Mid Level", "Senior", "Lead / Principal", "Manager / Director"],
+        key="pref_experience",
+    )
+
+    # Class standing uses keys/labels mapping — store the key in session state
+    saved_class_key = st.session_state.get("pref_class_key", "N/A")
+    saved_class_idx = _STANDING_KEYS.index(saved_class_key) if saved_class_key in _STANDING_KEYS else 0
+    class_standing_label = st.selectbox("Class Standing (optional)", _STANDING_LABELS, index=saved_class_idx)
     class_standing_key = _STANDING_KEYS[_STANDING_LABELS.index(class_standing_label)]
-    industry = st.text_input("Industry (optional)", placeholder="e.g. FinTech, Healthcare")
-    salary = st.text_input("Salary Range (optional)", placeholder="e.g. $90k – $120k")
+    st.session_state["pref_class_key"] = class_standing_key
+
+    industry = st.text_input(
+        "Industry (optional)",
+        key="pref_industry",
+        placeholder="e.g. FinTech, Healthcare",
+    )
+    salary = st.text_input(
+        "Salary Range (optional)",
+        key="pref_salary",
+        placeholder="e.g. $90k – $120k",
+    )
 
 st.divider()
+
+# --- NEW: show previous job searches from long-term memory ---
+job_history = memory.load_job_history(limit=3)
+if job_history:
+    with st.expander("📋 Recent Job Searches (from your history)"):
+        for entry in job_history:
+            st.caption(
+                f"**{entry['role']}** in {entry['location']} — "
+                f"searched {entry['searched_at'][:10]}"
+            )
+            st.text(entry["results"][:400] + ("…" if len(entry["results"]) > 400 else ""))
+            st.markdown("---")
 
 if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True):
     if not desired_role:
@@ -135,11 +186,59 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
         else:
             st.warning(compat_msg, icon="⚠️")
 
+    # --- LONG-TERM MEMORY: persist current preferences to SQLite ---
+    memory.save_preferences({
+        "desired_role":      desired_role,
+        "location":          location,
+        "work_type":         work_type,
+        "experience":        experience,
+        "class_standing_key": class_standing_key,
+        "industry":          industry,
+        "salary":            salary,
+    })
+    if resume_content:
+        memory.save_resume(resume_content)
+
     graduation_str = graduation_window(class_standing_key)
 
-    location_str = location or "remote"
-    work_type_str = f" {work_type.lower()}" if work_type != "Any" else ""
+    location_str   = location or "remote"
+    work_type_str  = f" {work_type.lower()}" if work_type != "Any" else ""
     experience_str = f" {experience}" if experience != "Any" else ""
+
+    # --- NEW: RAG retrieval — find semantically similar cached job postings ---
+    rag_jobs: list[dict] = []
+    if resume_content or desired_role:
+        rag_query = f"{desired_role} {location_str} {(resume_content or '')[:500]}"
+        with st.spinner("Checking knowledge base for similar roles…"):
+            rag_jobs = rag.retrieve_similar_jobs(rag_query, top_k=5)
+
+    # Display RAG results (reranked by cosine similarity) above the live search
+    if rag_jobs:
+        st.subheader("Similar Roles from Your Knowledge Base")
+        st.caption("These are the most semantically similar postings already in the system, ranked by relevance to your resume and target role.")
+        for job in rag_jobs:
+            score = job.get("similarity_score", 0.0)
+            score_pct = f"{score * 100:.0f}%"
+            st.markdown(
+                f"**{job.get('title', 'Role')}** — {job.get('company', '')}  "
+                f"| 📍 {job.get('location', '')}  | 🎯 Similarity: {score_pct}"
+            )
+            if job.get("description"):
+                st.caption(job["description"][:200] + "…")
+            st.markdown("---")
+
+    # Build RAG context block to pass as a hint to the live agent
+    rag_context = ""
+    if rag_jobs:
+        rag_context = (
+            "\n\nSIMILAR ROLES FROM KNOWLEDGE BASE "
+            "(top matches by semantic similarity — use as calibration context):\n"
+        )
+        for job in rag_jobs[:3]:
+            rag_context += (
+                f"- {job.get('title', '')} at {job.get('company', '')} "
+                f"({job.get('location', '')})\n"
+            )
 
     prompt = f"""You are a job search assistant. Your goal is to return exactly 5 real, currently open job postings with direct apply links. Follow every step below precisely.
 
@@ -147,7 +246,7 @@ if st.button("🔍 Find Relevant Jobs", type="primary", use_container_width=True
 {experience_str.strip() + " " if experience_str else ""}{desired_role}{work_type_str}, {location_str}{f', {industry}' if industry else ''}
 {f'Salary preference: {salary}' if salary else ''}
 {f'Candidate graduation window: {graduation_str} — prioritize postings that explicitly target this graduation cohort or are open to candidates graduating in this range (especially relevant for internships and new grad roles).' if graduation_str else ''}
-
+{rag_context}
 --- STEP-BY-STEP INSTRUCTIONS ---
 
 STEP 1: Search for individual job postings on ATS platforms and company career pages.
@@ -321,6 +420,15 @@ RULES:
             break
 
     if full_text:
+        # --- NEW: persist results to long-term memory and RAG vector store ---
+        memory.save_job_search(desired_role, location_str, full_text)
+        rag.add_job({
+            "title":       desired_role,
+            "company":     "Various (live search)",
+            "location":    location_str,
+            "description": full_text[:1000],  # truncated to keep embeddings focused
+        })
+
         st.download_button(
             "📥 Download Job List",
             full_text,

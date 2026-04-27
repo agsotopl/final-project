@@ -193,11 +193,28 @@ def extract_text_from_file(uploaded_file):
 
 
 def resume_inputs():
-    """Render the shared resume upload + text area and return combined content."""
+    """Render the shared resume upload + text area and return combined content.
+
+    SHORT-TERM MEMORY  – the text area is bound to st.session_state['resume_text']
+                         so it persists when the user switches between pages.
+    LONG-TERM MEMORY   – on the very first script run per browser session the
+                         last-saved resume is pre-loaded from SQLite via memory.py.
+    """
+    # --- LONG-TERM MEMORY: pre-load saved resume once per browser session ---
+    import memory as _mem
+    _mem.init_session_resume()
+
     st.subheader("Your Background")
+
+    if st.session_state.get("_resume_from_db") and st.session_state.get("resume_text"):
+        st.caption("Resume pre-loaded from your last session — edit below or upload a new file.")
+
     uploaded = st.file_uploader("Upload Resume (PDF, DOCX, or TXT)", type=["pdf", "docx", "txt"])
+
+    # SHORT-TERM MEMORY: key binds to session_state so content survives page switches
     pasted = st.text_area(
         "Or paste your resume / additional context here",
+        key="resume_text",
         height=250,
         placeholder="Work history, skills, education, achievements…",
     )
@@ -210,4 +227,10 @@ def resume_inputs():
     if pasted.strip():
         parts.append(pasted.strip())
 
-    return "\n\n".join(parts)
+    combined = "\n\n".join(parts)
+
+    # SHORT-TERM: cache the combined result for cross-page access
+    if combined:
+        st.session_state["resume_content"] = combined
+
+    return combined
