@@ -270,6 +270,11 @@ def generate_resume_pdf(text: str) -> bytes:
             story.append(Spacer(1, 4))
             continue
 
+        # Skip lines that classified to a type but have no actual content
+        if not content.strip():
+            story.append(Spacer(1, 4))
+            continue
+
         # Update state
         if kind == "italic":
             after_title = True
